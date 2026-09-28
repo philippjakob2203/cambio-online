@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Cambio Online</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Kartenspiel · Online-Räume</p>
+          <h1>Cambio Online</h1>
+        </div>
+        <div id="game-status" class="game-status">Bereit zum Spielen</div>
+      </header>
+
+      <p id="message" class="message" role="status" hidden></p>
+
+      <main>
+        <section id="connect-view" class="screen connect-view">
+          <div class="screen-heading">
+            <p class="eyebrow">Gemeinsam am Tisch</p>
+            <h2>Spiel erstellen oder beitreten</h2>
+          </div>
+          <div class="connect-columns">
+            <form id="create-form" class="form-section">
+              <h3>Neuen Raum erstellen</h3>
+              <label for="create-name">Dein Name</label>
+              <input id="create-name" maxlength="24" placeholder="Zum Beispiel Alex" autocomplete="nickname" />
+              <button type="submit">Raum erstellen</button>
+            </form>
+            <form id="join-form" class="form-section">
+              <h3>Mit Raumcode beitreten</h3>
+              <label for="join-name">Dein Name</label>
+              <input id="join-name" maxlength="24" placeholder="Zum Beispiel Sam" autocomplete="nickname" />
+              <label for="join-code">Raumcode</label>
+              <input id="join-code" maxlength="6" placeholder="ABC123" autocomplete="off" />
+              <button type="submit">Beitreten</button>
+            </form>
+          </div>
+        </section>
+
+        <section id="lobby-view" class="screen lobby-view" hidden>
+          <div class="lobby-heading">
+            <div>
+              <p class="eyebrow">Wartezimmer</p>
+              <h2>Raum <span class="room-code"></span></h2>
+              <p id="lobby-host-status"></p>
+            </div>
+            <span id="lobby-count" class="seat-count">0 / 13 Plätze</span>
+          </div>
+          <div class="invite-row">
+            <label for="lobby-invite">Einladungslink</label>
+            <input id="lobby-invite" class="invite-link" readonly />
+            <button id="lobby-copy-link" type="button" class="secondary-button">Link kopieren</button>
+          </div>
+          <ul id="lobby-seats" class="seat-list"></ul>
+          <div class="lobby-actions">
+            <button id="add-cpu" type="button" class="secondary-button">CPU hinzufügen</button>
+            <p id="lobby-waiting" hidden>Die Spielleitung startet, sobald alle bereit sind.</p>
+            <button id="start-game" type="button">Spiel starten</button>
+          </div>
+        </section>
+
+        <section id="game-view" class="screen game-view" hidden>
+          <div class="game-heading">
+            <div>
+              <p class="eyebrow"><span id="round-label"></span> · Raum <span id="game-room-code"></span></p>
+              <h2 id="turn-indicator">-</h2>
+              <p id="game-message"></p>
+            </div>
+            <div class="game-heading-actions">
+              <button id="game-copy-link" type="button" class="secondary-button">Einladungslink kopieren</button>
+              <button id="leave-room" type="button" class="quiet-button">Raum verlassen</button>
+            </div>
+          </div>
+
+          <div id="scoreboard" class="scoreboard"></div>
+
+          <div class="game-layout">
+            <aside class="panel controls-panel">
+              <h2>Dein Zug</h2>
+              <button id="draw-deck" type="button">Vom Deck ziehen</button>
+              <button id="draw-discard" type="button">Von der Ablage ziehen</button>
+              <button id="discard-drawn" type="button">Gezogene Karte ablegen</button>
+              <button id="schotten" type="button" class="secondary-button">Schotten dicht</button>
+
+              <div class="info-box">
+                <h3>Handkarten</h3>
+                <p id="peek-status">Zu Beginn jeder Runde sind zwei deiner Karten 5 Sekunden sichtbar.</p>
+              </div>
+              <div class="info-box drawn-info">
+                <h3>Gezogene Karte</h3>
+                <div id="drawn-card-box" class="mini-card empty">-</div>
+              </div>
+              <div class="pile-row">
+                <div class="pile-block">
+                  <h3>Deck</h3>
+                  <div id="deck-count" class="pile-count">0</div>
+                </div>
+                <div class="pile-block">
+                  <h3>Ablage</h3>
+                  <div id="discard-pile" class="discard-pile"></div>
+                </div>
+              </div>
+            </aside>
+
+            <section id="players" class="players" aria-label="Spieler und Handkarten"></section>
+          </div>
+
+          <footer class="panel log-panel">
+            <h2>Spielprotokoll</h2>
+            <div id="log" class="log"></div>
+          </footer>
+        </section>
+      </main>
+    </div>
+
+    <script src="multiplayer.js?v=4"></script>
+  </body>
+</html>
