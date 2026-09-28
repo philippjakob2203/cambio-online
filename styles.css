@@ -496,6 +496,20 @@ button:focus-visible {
   min-height: 76px;
 }
 
+.special-panel {
+  border-left: 3px solid var(--warn);
+}
+
+.special-actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.special-timer {
+  color: var(--warn);
+  font-size: 0.85rem;
+}
+
 .mini-card.red {
   color: #b91c1c;
 }

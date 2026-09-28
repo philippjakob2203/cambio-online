@@ -24,6 +24,9 @@ RANKS = [
     (12, "D", "Dame"), (13, "K", "König"),
 ]
 MAX_PLAYERS = 13
+CPU_TURN_DELAY = (1.7, 2.7)
+CPU_REACTION_DELAY = (2.5, 3.8)
+REACTION_WINDOW_SECONDS = 4.2
 ROOMS = {}
 ROOMS_LOCK = threading.RLock()
 
@@ -95,6 +98,9 @@ def new_room(host_name):
         "schottenRemaining": None,
         "reactionUntil": 0,
         "cpuReactionAt": {},
+        "cpuTurnAt": 0,
+        "pendingSpecial": None,
+        "privateReveal": None,
         "log": ["Raum erstellt. Weitere Personen können mit dem Raumcode beitreten."],
         "revision": 0,
         "winner": None,
@@ -110,6 +116,11 @@ def add_log(room, message):
 
 def bump(room):
     room["revision"] += 1
+
+
+def schedule_cpu_turn(room):
+    player = room["players"][room["currentIndex"]]
+    room["cpuTurnAt"] = time.time() + random.uniform(*CPU_TURN_DELAY) if player["type"] == "cpu" else 0
 
 
 def find_player(room, player_id):
@@ -157,6 +168,9 @@ def start_round(room):
     room["schottenRemaining"] = None
     room["reactionUntil"] = 0
     room["cpuReactionAt"] = {}
+    room["cpuTurnAt"] = 0
+    room["pendingSpecial"] = None
+    room["privateReveal"] = None
     now = time.time()
     for index, player in enumerate(room["players"]):
         hand_size = room["handSize"]
@@ -167,16 +181,154 @@ def start_round(room):
     room["nextAdjustment"] = None
     room["starterIndex"] %= len(room["players"])
     room["currentIndex"] = room["starterIndex"]
+    schedule_cpu_turn(room)
     add_log(room, f"Runde {room['round']} gestartet. {room['players'][room['currentIndex']]['name']} beginnt.")
 
 
 def start_reaction(room):
     room["phase"] = "reaction"
-    room["reactionUntil"] = time.time() + 1.5
+    room["reactionUntil"] = time.time() + REACTION_WINDOW_SECONDS
+    room["cpuTurnAt"] = 0
+    room["pendingSpecial"] = None
+    room["privateReveal"] = None
     room["cpuReactionAt"] = {
-        player["id"]: time.time() + random.uniform(0.2, 0.9)
+        player["id"]: time.time() + random.uniform(*CPU_REACTION_DELAY)
         for player in room["players"] if player["type"] == "cpu"
     }
+
+
+def begin_special(room, player, card):
+    rank = card["rankValue"]
+    if rank not in (7, 8, 9, 10, 11, 12):
+        start_reaction(room)
+        return
+    if player["type"] == "cpu":
+        resolve_cpu_special(room, player, rank)
+        start_reaction(room)
+        return
+    room["phase"] = "special"
+    room["cpuTurnAt"] = 0
+    room["pendingSpecial"] = {
+        "actorId": player["id"], "rank": rank, "step": "offer",
+        "deadline": time.time() + 30,
+    }
+    room["privateReveal"] = None
+
+
+def finish_special(room, message=None):
+    if message:
+        add_log(room, message)
+    room["pendingSpecial"] = None
+    room["privateReveal"] = None
+    start_reaction(room)
+
+
+def resolve_cpu_special(room, player, rank):
+    player_index = room["players"].index(player)
+    opponents = [index for index in range(len(room["players"])) if index != player_index]
+    if not player["hand"] or not opponents:
+        return
+    own_index = random.randrange(len(player["hand"]))
+    target_index = random.choice(opponents)
+    target = room["players"][target_index]
+    if rank in (7, 8):
+        add_log(room, f"{player['name']} schaut sich eine eigene Karte an.")
+    elif rank in (9, 10):
+        target_card_index = random.randrange(len(target["hand"]))
+        add_log(room, f"{player['name']} schaut sich eine Karte von {target['name']} an.")
+    elif rank == 11 and target["hand"]:
+        target_card_index = random.randrange(len(target["hand"]))
+        player["hand"][own_index], target["hand"][target_card_index] = target["hand"][target_card_index], player["hand"][own_index]
+        add_log(room, f"{player['name']} tauscht blind eine Karte mit {target['name']}.")
+    elif rank == 12 and target["hand"]:
+        target_card_index = random.randrange(len(target["hand"]))
+        own_card = player["hand"][own_index]
+        target_card = target["hand"][target_card_index]
+        if score_value(target_card) < score_value(own_card):
+            player["hand"][own_index], target["hand"][target_card_index] = target_card, own_card
+            add_log(room, f"{player['name']} schaut sich zwei Karten an und tauscht mit {target['name']}.")
+        else:
+            add_log(room, f"{player['name']} schaut sich zwei Karten an und tauscht nicht.")
+
+
+def handle_special_action(room, player, body):
+    special = room["pendingSpecial"]
+    if room["phase"] != "special" or not special or special["actorId"] != player["id"]:
+        raise ValueError("Du kannst gerade keine Sonderkarte ausführen.")
+    special["deadline"] = time.time() + 30
+    action = body.get("specialAction")
+    rank = special["rank"]
+    step = special["step"]
+    actor_index = room["players"].index(player)
+
+    if action == "skip":
+        finish_special(room, f"{player['name']} überspringt die Sonderfunktion.")
+        return
+    if action == "accept" and step == "offer":
+        special["step"] = {
+            7: "peek_own", 8: "peek_own", 9: "peek_target", 10: "peek_target",
+            11: "trade_own", 12: "queen_own",
+        }[rank]
+        return
+    if action == "select_own" and step in ("peek_own", "trade_own", "queen_own"):
+        card_index = int(body.get("cardIndex", -1))
+        if card_index < 0 or card_index >= len(player["hand"]):
+            raise ValueError("Diese Handkarte gibt es nicht.")
+        if step == "peek_own":
+            room["privateReveal"] = {
+                "actorId": player["id"],
+                "cards": [{"playerId": player["id"], "cardIndex": card_index, "card": player["hand"][card_index]}],
+                "until": time.time() + 4,
+            }
+            special["step"] = "viewing"
+            add_log(room, f"{player['name']} schaut sich eine eigene Karte an.")
+        else:
+            special["ownIndex"] = card_index
+            special["step"] = "trade_target" if step == "trade_own" else "queen_target"
+        return
+    if action == "select_target" and step in ("peek_target", "trade_target", "queen_target"):
+        target_index = int(body.get("targetPlayerIndex", -1))
+        card_index = int(body.get("cardIndex", -1))
+        if target_index < 0 or target_index >= len(room["players"]) or target_index == actor_index:
+            raise ValueError("Wähle eine andere Person aus.")
+        target = room["players"][target_index]
+        if card_index < 0 or card_index >= len(target["hand"]):
+            raise ValueError("Diese Handkarte gibt es nicht.")
+        if step == "peek_target":
+            room["privateReveal"] = {
+                "actorId": player["id"],
+                "cards": [{"playerId": target["id"], "cardIndex": card_index, "card": target["hand"][card_index]}],
+                "until": time.time() + 4,
+            }
+            special["step"] = "viewing"
+            add_log(room, f"{player['name']} schaut sich eine Karte von {target['name']} an.")
+        elif step == "trade_target":
+            own_index = special.pop("ownIndex")
+            player["hand"][own_index], target["hand"][card_index] = target["hand"][card_index], player["hand"][own_index]
+            finish_special(room, f"{player['name']} tauscht blind eine Karte mit {target['name']}.")
+        else:
+            own_index = special.pop("ownIndex")
+            room["privateReveal"] = {
+                "actorId": player["id"],
+                "cards": [
+                    {"playerId": player["id"], "cardIndex": own_index, "card": player["hand"][own_index]},
+                    {"playerId": target["id"], "cardIndex": card_index, "card": target["hand"][card_index]},
+                ],
+                "until": time.time() + 15,
+            }
+            special.update({"step": "queen_decide", "targetIndex": target_index, "targetCardIndex": card_index, "ownIndex": own_index})
+        return
+    if action in ("queen_swap", "queen_keep") and step == "queen_decide":
+        target = room["players"][special["targetIndex"]]
+        if action == "queen_swap":
+            own_index = special["ownIndex"]
+            target_card_index = special["targetCardIndex"]
+            player["hand"][own_index], target["hand"][target_card_index] = target["hand"][target_card_index], player["hand"][own_index]
+            finish_special(room, f"{player['name']} entscheidet sich für den Tausch mit {target['name']}.")
+        else:
+            finish_special(room, f"{player['name']} entscheidet sich gegen den Tausch.")
+        return
+    raise ValueError("Diese Sonderkarten-Aktion passt gerade nicht.")
 
 
 def matching_index(player, top_card):
@@ -233,6 +385,7 @@ def end_turn(room, actor_index):
     room["currentIndex"] = (actor_index + 1) % len(room["players"])
     room["phase"] = "turn"
     room["drawnCard"] = None
+    schedule_cpu_turn(room)
 
 
 def attempt_match(room, player_index, card_index, target_index=None, gift_index=None):
@@ -288,10 +441,11 @@ def process_cpu_turn(room):
         player["hand"][highest] = drawn
         room["discard"].append(replaced)
         add_log(room, f"{player['name']} tauscht eine Karte und legt eine ab.")
+        start_reaction(room)
     else:
         room["discard"].append(drawn)
         add_log(room, f"{player['name']} legt eine Karte ab.")
-    start_reaction(room)
+        begin_special(room, player, drawn)
     bump(room)
 
 
@@ -300,15 +454,18 @@ def snapshot(room, player_id):
     if viewer is None:
         raise ValueError("Du bist diesem Raum nicht beigetreten.")
     now = time.time()
+    private_reveal = room["privateReveal"]
+    private_cards = private_reveal["cards"] if private_reveal and private_reveal["actorId"] == player_id and now < private_reveal["until"] else []
     players = []
     for player in room["players"]:
         visible = player["id"] == player_id and now < player["revealUntil"]
+        reveal_indices = {item["cardIndex"] for item in private_cards if item["playerId"] == player["id"]}
         players.append({
             "id": player["id"],
             "name": player["name"],
             "type": player["type"],
             "score": player["score"],
-            "hand": [card if visible and index < 2 else None for index, card in enumerate(player["hand"])],
+            "hand": [card if (visible and index < 2) or index in reveal_indices else None for index, card in enumerate(player["hand"])],
             "cardCount": len(player["hand"]),
             "isHost": player["id"] == room["hostId"],
         })
@@ -331,6 +488,11 @@ def snapshot(room, player_id):
         "log": list(room["log"]),
         "winnerId": room["winner"],
         "schottenCallerId": room["schottenCaller"],
+        "special": ({"rank": room["pendingSpecial"]["rank"], "step": room["pendingSpecial"]["step"]}
+                    if room["pendingSpecial"] and room["pendingSpecial"]["actorId"] == player_id else None),
+        "specialResult": [item["card"] for item in private_cards],
+        "specialRevealRemaining": max(0, private_reveal["until"] - now)
+                                  if private_cards and room["pendingSpecial"] and room["pendingSpecial"]["step"] == "viewing" else 0,
     }
 
 
@@ -469,6 +631,12 @@ class GameHandler(SimpleHTTPRequestHandler):
             self.send_json(200, {"ok": True})
             return
 
+        if action == "special_action":
+            handle_special_action(room, player, body)
+            bump(room)
+            self.send_json(200, {"ok": True})
+            return
+
         if room["phase"] != "turn" or room["players"][room["currentIndex"]]["id"] != player_id:
             raise ValueError("Du bist gerade nicht am Zug.")
         if action == "draw_deck":
@@ -493,7 +661,7 @@ class GameHandler(SimpleHTTPRequestHandler):
             room["discard"].append(card)
             room["drawnCard"] = None
             add_log(room, f"{player['name']} legt eine Karte ab.")
-            start_reaction(room)
+            begin_special(room, player, card)
         elif action == "swap":
             if not room["drawnCard"]:
                 raise ValueError("Ziehe zuerst eine Karte.")
@@ -520,6 +688,7 @@ class GameHandler(SimpleHTTPRequestHandler):
                 finish_round(room)
             else:
                 room["currentIndex"] = room["schottenRemaining"][0]
+                schedule_cpu_turn(room)
         else:
             raise ValueError("Unbekannte Aktion.")
 
@@ -559,8 +728,19 @@ def run_cpu_loop():
                         bump(room)
                 elif room["phase"] == "turn" and room["players"]:
                     player = room["players"][room["currentIndex"]]
-                    if player["type"] == "cpu":
+                    if player["type"] == "cpu" and now >= room["cpuTurnAt"]:
                         process_cpu_turn(room)
+                elif room["phase"] == "special" and room["pendingSpecial"]:
+                    special = room["pendingSpecial"]
+                    if special["step"] == "viewing" and room["privateReveal"] and now >= room["privateReveal"]["until"]:
+                        finish_special(room)
+                        bump(room)
+                    elif special["step"] == "queen_decide" and now >= special["deadline"]:
+                        finish_special(room, "Die Dame-Sonderfunktion wurde ohne Tausch beendet.")
+                        bump(room)
+                    elif now >= special["deadline"]:
+                        finish_special(room, "Die Sonderfunktion wurde übersprungen.")
+                        bump(room)
         time.sleep(0.05)
 
 

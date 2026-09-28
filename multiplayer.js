@@ -132,11 +132,12 @@ function inviteUrl(code) {
 }
 
 function renderRoom(snapshot) {
-  const renderKey = JSON.stringify({ ...snapshot, reactionRemaining: 0 });
+  const renderKey = JSON.stringify({ ...snapshot, reactionRemaining: 0, specialRevealRemaining: 0 });
   if (connection.renderKey === renderKey) {
     if (snapshot.phase === 'reaction') {
       document.getElementById('game-status').textContent = `Reaktionsfenster: ${snapshot.reactionRemaining.toFixed(1)} s`;
     }
+    if (snapshot.specialRevealRemaining > 0) updateSpecialTimer(snapshot.specialRevealRemaining);
     return;
   }
   connection.renderKey = renderKey;
@@ -178,7 +179,13 @@ function cardMarkup(card, playerIndex, cardIndex, snapshot) {
   const isHidden = !card;
   const canMatch = snapshot.phase === 'reaction' && snapshot.players.some((player) => player.id === connection.playerId && player.type === 'human');
   const canSwap = Boolean(snapshot.drawnCard) && snapshot.currentPlayerId === connection.playerId && snapshot.phase === 'turn';
-  const active = canMatch || (canSwap && playerIndex === snapshot.players.findIndex((player) => player.id === connection.playerId));
+  const ownIndex = snapshot.players.findIndex((player) => player.id === connection.playerId);
+  const specialStep = snapshot.special?.step;
+  const selectingOwn = ['peek_own', 'trade_own', 'queen_own', 'select_gift'].includes(specialStep);
+  const selectingTarget = ['peek_target', 'trade_target', 'queen_target'].includes(specialStep);
+  const specialSelectable = snapshot.phase === 'special'
+    && (selectingOwn ? playerIndex === ownIndex : selectingTarget && playerIndex !== ownIndex);
+  const active = canMatch || specialSelectable || (canSwap && playerIndex === ownIndex);
   const short = card ? `${card.short}${card.suit}` : 'Verdeckte Karte';
   return `<button class="card ${card && card.color === 'red' ? 'red' : 'black'} ${isHidden ? 'hidden' : ''}" data-player-index="${playerIndex}" data-card-index="${cardIndex}" aria-label="${escapeHtml(short)}" ${active ? '' : 'disabled'}>
     <span class="rank">${card ? escapeHtml(card.short) : '?'}</span>
@@ -205,6 +212,7 @@ function renderGame(snapshot) {
     ? `<div class="mini-card ${discard.color === 'red' ? 'red' : 'black'}">${escapeHtml(discard.short)}${escapeHtml(discard.suit)}</div>`
     : '<div class="mini-card empty">-</div>';
   const drawn = snapshot.drawnCard;
+  renderSpecial(snapshot);
   const drawnBox = document.getElementById('drawn-card-box');
   drawnBox.textContent = drawn ? `${drawn.short}${drawn.suit}` : '-';
   drawnBox.classList.toggle('empty', !drawn);
@@ -220,6 +228,8 @@ function renderGame(snapshot) {
   `).join('');
   document.getElementById('turn-indicator').textContent = snapshot.phase === 'finished'
     ? `Spielende: ${escapeHtml(snapshot.players.find((player) => player.id === snapshot.winnerId)?.name || 'Gewinner')}`
+    : snapshot.phase === 'special'
+      ? snapshot.currentPlayerId === connection.playerId ? 'Deine Sonderkarte' : `${escapeHtml(snapshot.currentPlayerName)} führt eine Sonderkarte aus.`
     : inReaction
       ? 'Schnell! Lege eine passende Karte auf die Ablage.'
       : current
@@ -237,6 +247,8 @@ function renderGame(snapshot) {
   document.getElementById('schotten').disabled = !canPlay || Boolean(drawn);
   document.getElementById('game-status').textContent = snapshot.phase === 'finished'
     ? 'Partie beendet'
+    : snapshot.phase === 'special'
+      ? 'Sonderkarte'
     : inReaction
       ? `Reaktionsfenster: ${snapshot.reactionRemaining.toFixed(1)} s`
       : current
@@ -248,6 +260,44 @@ function renderGame(snapshot) {
     : snapshot.phase === 'finished'
       ? `${snapshot.players.find((player) => player.id === snapshot.winnerId)?.name || 'Eine Person'} gewinnt.`
       : `Raum ${snapshot.code} · ${snapshot.players.length} / 13 Personen`;
+}
+
+function renderSpecial(snapshot) {
+  const panel = document.getElementById('special-panel');
+  const special = snapshot.special;
+  const isActor = snapshot.phase === 'special' && Boolean(special);
+  panel.hidden = !isActor;
+  if (!isActor) return;
+
+  const titles = { 7: '7 · Eigene Karte ansehen', 8: '8 · Eigene Karte ansehen', 9: '9 · Fremde Karte ansehen', 10: '10 · Fremde Karte ansehen', 11: 'Bube · Blind tauschen', 12: 'Dame · Ansehen und entscheiden' };
+  const prompts = {
+    offer: 'Möchtest du die Sonderfunktion nutzen?',
+    peek_own: 'Wähle eine deiner verdeckten Karten.',
+    peek_target: 'Wähle die verdeckte Karte einer anderen Person.',
+    trade_own: 'Wähle zuerst eine eigene Karte.',
+    trade_target: 'Wähle danach eine verdeckte Karte einer anderen Person.',
+    queen_own: 'Wähle eine eigene Karte zum Vergleichen.',
+    queen_target: 'Wähle die Karte einer anderen Person.',
+    queen_decide: 'Du hast beide Karten gesehen. Möchtest du tauschen?',
+    viewing: 'Diese Karte ist nur für dich sichtbar.',
+  };
+  document.getElementById('special-title').textContent = titles[special.rank] || 'Sonderkarte';
+  document.getElementById('special-prompt').textContent = prompts[special.step] || '';
+  const actions = document.getElementById('special-actions');
+  if (special.step === 'offer') {
+    actions.innerHTML = '<button type="button" data-special-action="accept">Ausführen</button><button type="button" class="secondary-button" data-special-action="skip">Überspringen</button>';
+  } else if (special.step === 'queen_decide') {
+    actions.innerHTML = '<button type="button" data-special-action="queen_swap">Tauschen</button><button type="button" class="secondary-button" data-special-action="queen_keep">Nicht tauschen</button>';
+  } else {
+    actions.innerHTML = '';
+  }
+  updateSpecialTimer(snapshot.specialRevealRemaining);
+}
+
+function updateSpecialTimer(seconds) {
+  const timer = document.getElementById('special-timer');
+  if (!timer) return;
+  timer.textContent = seconds > 0 ? `Noch ${Math.ceil(seconds)} Sekunden` : '';
 }
 
 async function sendAction(action, extra = {}) {
@@ -298,7 +348,15 @@ function attachEvents() {
     if (!card || !connection.snapshot) return;
     const playerIndex = Number(card.dataset.playerIndex);
     const cardIndex = Number(card.dataset.cardIndex);
-    if (connection.snapshot.phase === 'reaction') {
+    if (connection.snapshot.phase === 'special' && connection.snapshot.special) {
+      const ownIndex = connection.snapshot.players.findIndex((player) => player.id === connection.playerId);
+      const step = connection.snapshot.special.step;
+      if (['peek_own', 'trade_own', 'queen_own'].includes(step) && playerIndex === ownIndex) {
+        sendAction('special_action', { specialAction: 'select_own', cardIndex });
+      } else if (['peek_target', 'trade_target', 'queen_target'].includes(step) && playerIndex !== ownIndex) {
+        sendAction('special_action', { specialAction: 'select_target', targetPlayerIndex: playerIndex, cardIndex });
+      }
+    } else if (connection.snapshot.phase === 'reaction') {
       const ownIndex = connection.snapshot.players.findIndex((player) => player.id === connection.playerId);
       if (connection.pendingMatch) {
         if (playerIndex !== ownIndex) return;
@@ -323,6 +381,10 @@ function attachEvents() {
   document.getElementById('lobby-seats').addEventListener('click', (event) => {
     const button = event.target.closest('.remove-cpu');
     if (button) hostRequest('/cpu/remove', { cpuId: button.dataset.playerId });
+  });
+  document.getElementById('special-actions').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-special-action]');
+    if (button) sendAction('special_action', { specialAction: button.dataset.specialAction });
   });
 }
 
